@@ -1,0 +1,10 @@
+target/
+node_modules/
+.env*
+!.env.example
+.idea/
+.vscode/
+*.class
+*.jar
+*.war
+*.ear
