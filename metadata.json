@@ -1,0 +1,5 @@
+{
+  "name": "CivicWatch",
+  "description": "A production-ready community reporting platform for tracking and resolving local issues with GIS support and real-time updates.",
+  "requestFramePermissions": ["geolocation"]
+}
