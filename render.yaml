@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: civicwatch-api
+    env: java
+    plan: free
+    buildCommand: "cd backend && mvn clean package"
+    startCommand: "java -Dserver.port=${PORT} -jar target/civicwatch-api-0.0.1-SNAPSHOT.jar"
+    envVars:
+      - key: DB_URL
+        value: "${DB_URL}"
+      - key: DB_USERNAME
+        value: "${DB_USERNAME}"
+      - key: DB_PASSWORD
+        value: "${DB_PASSWORD}"
+      - key: JWT_SECRET
+        value: "${JWT_SECRET}"
