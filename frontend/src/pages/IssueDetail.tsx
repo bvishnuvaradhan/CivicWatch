@@ -36,7 +36,7 @@ const IssueDetail = () => {
         const [issueRes, commentsRes, similarRes] = await Promise.allSettled([
           api.get(`/issues/${id}`),
           api.get(`/issues/${id}/comments`),
-          api.get(`/issues/nearby?lat=0&lng=0&radius=10000000`) // Mock similar
+          api.get(`/issues/nearby?lat=0&lng=0&radius=10000000&limit=20`) // Mock similar
         ]);
 
         if (issueRes.status === 'fulfilled') {

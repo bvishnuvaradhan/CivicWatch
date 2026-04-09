@@ -6,6 +6,7 @@ import java.util.UUID;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -38,9 +39,10 @@ public class IssueController {
             @RequestParam(defaultValue = "ALL") String category,
             @RequestParam(defaultValue = "ALL") String status,
             @RequestParam(defaultValue = "") String search,
-            @RequestParam(defaultValue = "5000") double radius
+            @RequestParam(defaultValue = "5000") double radius,
+            @RequestParam(defaultValue = "50") int limit
     ) {
-        return ResponseEntity.ok(service.getIssues(category, status, search));
+        return ResponseEntity.ok(service.getIssues(category, status, search, limit));
     }
 
     @PostMapping
@@ -78,5 +80,11 @@ public class IssueController {
     @GetMapping("/mine")
     public ResponseEntity<List<Issue>> getMyIssues() {
         return ResponseEntity.ok(service.getMyReportedIssues());
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteIssue(@PathVariable UUID id) {
+        service.deleteIssue(id);
+        return ResponseEntity.ok().build();
     }
 }

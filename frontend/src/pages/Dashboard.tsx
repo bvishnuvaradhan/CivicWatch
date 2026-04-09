@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { 
   MapPin, 
   Search, 
@@ -17,25 +16,19 @@ import { Link, useNavigate } from 'react-router-dom';
 import api from '../lib/api';
 import { Issue } from '../types';
 import { formatDistanceToNow } from 'date-fns';
-import L from 'leaflet';
 import { useAuth } from '../context/AuthContext';
 
-// Fix Leaflet icon issue
-const DefaultIcon = L.icon({
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41]
-});
-L.Marker.prototype.options.icon = DefaultIcon;
+const IssuesMap = lazy(() => import('../components/IssuesMap'));
 
 const Dashboard = () => {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [activities, setActivities] = useState<any[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [issuesLoading, setIssuesLoading] = useState(true);
   const [location, setLocation] = useState<{ lat: number; lng: number }>({ lat: 17.3850, lng: 78.4867 }); // Default Hyderabad
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [filterCategory, setFilterCategory] = useState('ALL');
   const [filterStatus, setFilterStatus] = useState('ALL');
   const [viewMode, setViewMode] = useState<'LIST' | 'MAP'>('LIST');
@@ -54,21 +47,20 @@ const Dashboard = () => {
     );
   }, []);
 
-  const fetchIssues = async (loc: { lat: number; lng: number }) => {
-    setLoading(true);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  const fetchStatsAndActivity = async () => {
     try {
-      const [issuesRes, activityRes, statsRes] = await Promise.allSettled([
-        api.get(`/issues/nearby?lat=${loc.lat}&lng=${loc.lng}&category=${filterCategory}&status=${filterStatus}&search=${searchQuery}`),
+      const [activityRes, statsRes] = await Promise.allSettled([
         api.get('/activity'),
         api.get('/issues/stats')
       ]);
-
-      if (issuesRes.status === 'fulfilled') {
-        setIssues(Array.isArray(issuesRes.value.data) ? issuesRes.value.data : []);
-      } else {
-        console.error(issuesRes.reason);
-        setIssues([]);
-      }
 
       if (activityRes.status === 'fulfilled') {
         setActivities(Array.isArray(activityRes.value.data) ? activityRes.value.data.slice(0, 4) : []);
@@ -79,14 +71,30 @@ const Dashboard = () => {
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  useEffect(() => {
+    void fetchStatsAndActivity();
+  }, []);
+
+  const fetchIssues = async (loc: { lat: number; lng: number }) => {
+    setIssuesLoading(true);
+    try {
+      const issuesRes = await api.get(`/issues/nearby?lat=${loc.lat}&lng=${loc.lng}&category=${filterCategory}&status=${filterStatus}&search=${encodeURIComponent(debouncedSearchQuery)}&limit=50`);
+      setIssues(Array.isArray(issuesRes.data) ? issuesRes.data : []);
+    } catch (err) {
+      console.error(err);
+      setIssues([]);
     } finally {
+      setIssuesLoading(false);
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchIssues(location);
-  }, [location, filterCategory, filterStatus, searchQuery]);
+    void fetchIssues(location);
+  }, [location, filterCategory, filterStatus, debouncedSearchQuery]);
 
   const filteredIssues = issues;
 
@@ -182,7 +190,7 @@ const Dashboard = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {/* Main Content */}
           <div className="lg:col-span-2">
-            {loading ? (
+            {loading || issuesLoading ? (
               <div className="flex justify-center items-center h-96">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600" />
               </div>
@@ -214,7 +222,7 @@ const Dashboard = () => {
                         <div className="flex flex-col md:flex-row">
                           <div className="md:w-48 h-48 bg-slate-100 relative overflow-hidden">
                             {issue.imageUrl ? (
-                              <img src={issue.imageUrl} alt={issue.title} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                              <img src={issue.imageUrl} alt={issue.title} loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
                             ) : (
                               <div className="w-full h-full flex items-center justify-center text-slate-300">
                                 <MapPin className="w-12 h-12" />
@@ -278,23 +286,9 @@ const Dashboard = () => {
               </div>
             ) : (
               <div className="h-150 bg-white rounded-3xl border border-slate-200 overflow-hidden shadow-inner relative">
-                <MapContainer center={[location.lat, location.lng]} zoom={13} style={{ height: '100%', width: '100%' }}>
-                  <TileLayer
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                  />
-                  {filteredIssues.map((issue) => (
-                    <Marker key={issue.id} position={[issue.latitude, issue.longitude]}>
-                      <Popup>
-                        <div className="p-2">
-                          <h4 className="font-bold text-slate-900">{issue.title}</h4>
-                          <p className="text-xs text-slate-500 mt-1 line-clamp-2">{issue.description}</p>
-                          <Link to={`/issue/${issue.id}`} className="text-indigo-600 text-xs font-bold mt-2 block">View Details</Link>
-                        </div>
-                      </Popup>
-                    </Marker>
-                  ))}
-                </MapContainer>
+                <Suspense fallback={<div className="flex items-center justify-center h-full text-slate-400 font-black uppercase tracking-widest text-xs">Loading map...</div>}>
+                  <IssuesMap location={location} issues={filteredIssues} />
+                </Suspense>
               </div>
             )}
           </div>

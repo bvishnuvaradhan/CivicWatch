@@ -95,7 +95,7 @@ const AdminDashboard = () => {
   const fetchDashboardData = async () => {
     try {
       const [issuesRes, workersRes] = await Promise.allSettled([
-        api.get('/issues/nearby?lat=0&lng=0&radius=10000000'),
+        api.get('/issues/nearby?lat=0&lng=0&radius=10000000&limit=250'),
         api.get('/admin/workers'),
       ]);
 

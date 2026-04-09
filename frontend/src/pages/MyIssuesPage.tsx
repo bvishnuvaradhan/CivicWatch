@@ -1,16 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate } from 'react-router-dom';
-import { Clock, MapPin, ChevronRight, Filter } from 'lucide-react';
+import { Clock, MapPin, ChevronRight, Filter, Trash2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../lib/api';
 import { Issue } from '../types';
 import { formatDistanceToNow } from 'date-fns';
+import DeleteConfirmModal from '../components/DeleteConfirmModal';
 
 const MyIssuesPage = () => {
   const { user } = useAuth();
   const [issues, setIssues] = useState<Issue[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [selectedIssueForDelete, setSelectedIssueForDelete] = useState<Issue | null>(null);
 
   useEffect(() => {
     if (user) {
@@ -29,6 +33,33 @@ const MyIssuesPage = () => {
     }
   };
 
+  const deleteIssue = async (issueId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const issue = issues.find(i => i.id === issueId);
+    if (issue) {
+      setSelectedIssueForDelete(issue);
+      setDeleteModalOpen(true);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!selectedIssueForDelete) return;
+
+    setDeletingId(selectedIssueForDelete.id);
+    try {
+      await api.delete(`/issues/${selectedIssueForDelete.id}`);
+      setIssues(issues.filter(issue => issue.id !== selectedIssueForDelete.id));
+      setDeleteModalOpen(false);
+      setSelectedIssueForDelete(null);
+    } catch (err) {
+      alert('Failed to delete issue. Please try again.');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const filteredIssues = useMemo(() => {
     if (statusFilter === 'ALL') return issues;
     return issues.filter((issue) => issue.status === statusFilter);
@@ -37,7 +68,19 @@ const MyIssuesPage = () => {
   if (!user) return <Navigate to="/auth" />;
 
   return (
-    <div className="min-h-screen bg-slate-50 py-12">
+    <>
+      <DeleteConfirmModal
+        isOpen={deleteModalOpen}
+        title="Delete Issue"
+        message={`Are you sure you want to delete "${selectedIssueForDelete?.title}"? This action cannot be undone. All comments and votes will also be deleted.`}
+        onConfirm={confirmDelete}
+        onCancel={() => {
+          setDeleteModalOpen(false);
+          setSelectedIssueForDelete(null);
+        }}
+        isLoading={deletingId === selectedIssueForDelete?.id}
+      />
+      <div className="min-h-screen bg-slate-50 py-12">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-8">
           <div>
@@ -110,13 +153,27 @@ const MyIssuesPage = () => {
                   <p className="text-xs text-slate-500 truncate mt-1">{issue.address || 'No location provided'}</p>
                   <p className="text-[11px] text-slate-400 mt-1">{formatDistanceToNow(new Date(issue.createdAt))} ago</p>
                 </div>
+                <button
+                  onClick={(e) => deleteIssue(issue.id, e)}
+                  disabled={deletingId === issue.id}
+                  className="shrink-0 p-2 text-red-500 hover:bg-red-50 rounded-2xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  aria-label="Delete issue"
+                  title="Delete this issue"
+                >
+                  {deletingId === issue.id ? (
+                    <div className="w-5 h-5 border-2 border-red-200 border-t-red-500 rounded-full animate-spin" />
+                  ) : (
+                    <Trash2 className="w-5 h-5" />
+                  )}
+                </button>
                 <ChevronRight className="w-5 h-5 text-slate-300" />
               </Link>
             ))}
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </>
   );
 };
 

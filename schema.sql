@@ -78,3 +78,14 @@ CREATE TABLE IF NOT EXISTS flags (
     reason TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Performance indexes
+CREATE INDEX IF NOT EXISTS idx_issues_status_created_at ON issues (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_issues_category_created_at ON issues (category, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_issues_created_by_created_at ON issues (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_issues_worker_status_created_at ON issues (worker_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_comments_issue_id ON comments (issue_id);
+CREATE INDEX IF NOT EXISTS idx_votes_issue_id ON votes (issue_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id_created_at ON notifications (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_workers_user_id ON workers (user_id);
+CREATE INDEX IF NOT EXISTS idx_users_role_reputation_points ON users (role, reputation_points DESC);

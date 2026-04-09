@@ -8,7 +8,6 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -19,6 +18,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 import org.springframework.dao.DataAccessException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.security.core.Authentication;
@@ -61,6 +61,7 @@ public class IssueService {
     public void initSchemaSafeguards() {
         try {
             ensureIssueReviewColumns();
+            ensurePerformanceIndexes();
         } catch (DataAccessException ignored) {
             // Keep startup resilient; endpoints will still surface DB errors if schema is unreachable.
         }
@@ -76,10 +77,7 @@ public class IssueService {
     }
 
     public List<Issue> getAllIssues() {
-        return repository.findAll().stream()
-                .sorted(Comparator.comparing(Issue::getCreatedAt, Comparator.nullsLast(LocalDateTime::compareTo)).reversed())
-                .map(this::enrichIssueCounts)
-                .toList();
+        return enrichIssueCounts(repository.findAllByOrderByCreatedAtDesc());
     }
 
     @Transactional(readOnly = true)
@@ -88,27 +86,34 @@ public class IssueService {
         if (currentUser == null || currentUser.getId() == null) {
             throw new RuntimeException("Please login to view your issues");
         }
-        return repository.findByCreatedByIdOrderByCreatedAtDesc(currentUser.getId())
-                .stream()
-                .map(this::enrichIssueCounts)
-                .toList();
+        return enrichIssueCounts(repository.findByCreatedByIdOrderByCreatedAtDesc(currentUser.getId()));
     }
 
     public List<Issue> getIssues(String category, String status, String search) {
-        String normalizedCategory = category == null ? "ALL" : category;
-        String normalizedStatus = status == null ? "ALL" : status;
-        String normalizedSearch = search == null ? "" : search.trim().toLowerCase();
+        return getIssues(category, status, search, 100);
+    }
 
-        return repository.findAll().stream()
-                .sorted(Comparator.comparing(Issue::getCreatedAt, Comparator.nullsLast(LocalDateTime::compareTo)).reversed())
-                .filter(issue -> "ALL".equals(normalizedCategory) || normalizedCategory.equalsIgnoreCase(issue.getCategory()))
-                .filter(issue -> "ALL".equals(normalizedStatus) || normalizedStatus.equalsIgnoreCase(issue.getStatus().name()))
-                .filter(issue -> normalizedSearch.isEmpty()
-                || (issue.getTitle() != null && issue.getTitle().toLowerCase().contains(normalizedSearch))
-                || (issue.getDescription() != null && issue.getDescription().toLowerCase().contains(normalizedSearch))
-                || (issue.getAddress() != null && issue.getAddress().toLowerCase().contains(normalizedSearch)))
-                .map(this::enrichIssueCounts)
-                .toList();
+    public List<Issue> getIssues(String category, String status, String search, int limit) {
+        String normalizedCategory = category == null ? "ALL" : category.trim();
+        String normalizedStatus = status == null ? "ALL" : status.trim();
+        String normalizedSearch = search == null ? "" : search.trim().toLowerCase(Locale.ROOT);
+
+        int effectiveLimit = Math.max(1, Math.min(limit, 200));
+        com.civicwatch.model.Status statusFilter = null;
+        if (!"ALL".equalsIgnoreCase(normalizedStatus) && !normalizedStatus.isBlank()) {
+            try {
+                statusFilter = com.civicwatch.model.Status.valueOf(normalizedStatus.toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ex) {
+                return List.of();
+            }
+        }
+
+        return enrichIssueCounts(repository.searchIssues(
+                normalizedCategory,
+                statusFilter,
+                normalizedSearch,
+                PageRequest.of(0, effectiveLimit)
+        ).getContent());
     }
 
     public Issue createIssue(Issue issue) {
@@ -132,6 +137,31 @@ public class IssueService {
     public Issue getIssueById(UUID id) {
         Issue issue = repository.findById(id).orElseThrow();
         return enrichIssueCounts(issue);
+    }
+
+    @Transactional
+    public void deleteIssue(UUID id) {
+        User currentUser = getCurrentUser();
+        if (currentUser == null) {
+            throw new RuntimeException("Please login to delete an issue");
+        }
+
+        Issue issue = repository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Issue not found"));
+
+        // Check if current user is the creator of this issue
+        if (issue.getCreatedBy() == null || !issue.getCreatedBy().getId().equals(currentUser.getId())) {
+            throw new RuntimeException("You can only delete issues you have reported");
+        }
+
+        // Delete related comments and votes (cascaded by JPA, but explicit for clarity)
+        commentRepository.deleteByIssueId(id);
+        voteRepository.deleteByIssueId(id);
+
+        // Delete the issue
+        repository.deleteById(id);
+
+        logAudit("ISSUE_DELETED", "Issue " + id + " deleted by " + currentUser.getEmail());
     }
 
     public Comment addComment(UUID issueId, Comment comment) {
@@ -170,27 +200,41 @@ public class IssueService {
     }
 
     public Map<String, Object> getStats() {
-        List<Issue> issues = repository.findAll();
         Map<String, Object> stats = new HashMap<>();
-        stats.put("total", issues.size());
+        long total = repository.count();
+        stats.put("total", total);
         stats.put("activeUsers", userRepository.count());
-        stats.put("byCategory", issues.stream().collect(Collectors.groupingBy(Issue::getCategory, Collectors.counting())));
-        stats.put("byStatus", issues.stream().collect(Collectors.groupingBy(i -> i.getStatus().name(), Collectors.counting())));
-        stats.put("resolvedPercentage", issues.isEmpty()
-                ? 0
-                : Math.round((issues.stream().filter(issue -> issue.getStatus() == com.civicwatch.model.Status.RESOLVED).count() * 100.0) / issues.size()));
-        stats.put("reportsToday", issues.stream()
-                .filter(issue -> issue.getCreatedAt() != null && issue.getCreatedAt().toLocalDate().equals(LocalDate.now()))
-                .count());
+
+        Map<String, Long> byCategory = new HashMap<>();
+        for (Object[] row : repository.countByCategoryGroup()) {
+            String key = row[0] == null ? "UNKNOWN" : String.valueOf(row[0]);
+            long count = row[1] == null ? 0L : ((Number) row[1]).longValue();
+            byCategory.put(key, count);
+        }
+        stats.put("byCategory", byCategory);
+
+        Map<String, Long> byStatus = new HashMap<>();
+        for (Object[] row : repository.countByStatusGroup()) {
+            String key = row[0] == null ? "UNKNOWN" : String.valueOf(row[0]);
+            long count = row[1] == null ? 0L : ((Number) row[1]).longValue();
+            byStatus.put(key, count);
+        }
+        stats.put("byStatus", byStatus);
+
+        long resolvedCount = repository.countByStatus(com.civicwatch.model.Status.RESOLVED);
+        stats.put("resolvedPercentage", total == 0 ? 0 : Math.round((resolvedCount * 100.0) / total));
+
+        LocalDate today = LocalDate.now();
+        LocalDateTime todayStart = today.atStartOfDay();
+        LocalDateTime tomorrowStart = today.plusDays(1).atStartOfDay();
+        stats.put("reportsToday", repository.countByCreatedAtBetween(todayStart, tomorrowStart));
 
         List<Map<String, Object>> weeklyActivity = new ArrayList<>();
-        LocalDate startDate = LocalDate.now().minusDays(6);
+        LocalDate startDate = today.minusDays(6);
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("EEE");
         for (int offset = 0; offset < 7; offset++) {
             LocalDate day = startDate.plusDays(offset);
-            long count = issues.stream()
-                    .filter(issue -> issue.getCreatedAt() != null && issue.getCreatedAt().toLocalDate().equals(day))
-                    .count();
+            long count = repository.countByCreatedAtBetween(day.atStartOfDay(), day.plusDays(1).atStartOfDay());
             Map<String, Object> entry = new HashMap<>();
             entry.put("name", day.format(formatter));
             entry.put("reports", count);
@@ -316,16 +360,25 @@ public class IssueService {
     }
 
     public List<Map<String, Object>> getLeaderboard() {
-        List<Issue> issues = repository.findAll();
-        return userRepository.findAll().stream()
-                .filter(user -> user.getRole() == Role.USER)
-                .sorted((left, right) -> Integer.compare(right.getReputationPoints(), left.getReputationPoints()))
+        List<User> users = userRepository.findByRoleOrderByReputationPointsDesc(Role.USER);
+        List<UUID> userIds = users.stream().map(User::getId).filter(Objects::nonNull).toList();
+        Map<UUID, Long> reportsByUser = new HashMap<>();
+        if (!userIds.isEmpty()) {
+            for (Object[] row : repository.countReportsByCreatorIds(userIds)) {
+                UUID userId = toUuid(row[0]);
+                if (userId != null) {
+                    reportsByUser.put(userId, row[1] == null ? 0L : ((Number) row[1]).longValue());
+                }
+            }
+        }
+
+        return users.stream()
                 .map(user -> {
                     Map<String, Object> entry = new HashMap<>();
                     entry.put("id", user.getId());
                     entry.put("name", user.getName());
                     entry.put("reputationPoints", user.getReputationPoints());
-                    entry.put("reportsCount", issues.stream().filter(issue -> issue.getCreatedBy() != null && user.getId().equals(issue.getCreatedBy().getId())).count());
+                    entry.put("reportsCount", reportsByUser.getOrDefault(user.getId(), 0L));
                     return entry;
                 })
                 .toList();
@@ -415,7 +468,18 @@ public class IssueService {
     }
 
     public List<Worker> getAllWorkers() {
-        return workerRepository.findAll().stream().map(this::enrichWorkerAvailability).toList();
+        List<Worker> workers = workerRepository.findAll();
+        if (workers.isEmpty()) {
+            return workers;
+        }
+        List<UUID> workerIds = workers.stream().map(Worker::getId).filter(Objects::nonNull).toList();
+        Map<UUID, Long> activeByWorker = loadActiveIssueCountsForWorkers(workerIds);
+        workers.forEach(worker -> {
+            long activeCount = activeByWorker.getOrDefault(worker.getId(), 0L);
+            worker.setActiveIssueCount(activeCount);
+            worker.setAvailable(activeCount < MAX_ACTIVE_ISSUES_PER_WORKER);
+        });
+        return workers;
     }
 
     public Worker createWorker(Worker worker) {
@@ -431,17 +495,9 @@ public class IssueService {
             throw new RuntimeException("Please login to view tasks");
         }
 
-        Worker worker = workerRepository.findAll().stream()
-                .filter(item -> item.getUser() != null && currentUser.getId().equals(item.getUser().getId()))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("No worker profile linked to this account"));
+        Worker worker = findWorkerForCurrentUser(currentUser.getId());
 
-        return repository.findAll().stream()
-                .filter(issue -> issue.getAssignedWorker() != null
-                && issue.getAssignedWorker().getId() != null
-                && issue.getAssignedWorker().getId().equals(worker.getId()))
-                .map(this::enrichIssueCounts)
-                .toList();
+        return enrichIssueCounts(repository.findByAssignedWorkerIdOrderByCreatedAtDesc(worker.getId()));
     }
 
     @Transactional
@@ -451,10 +507,7 @@ public class IssueService {
             throw new RuntimeException("Please login to update task status");
         }
 
-        Worker worker = workerRepository.findAll().stream()
-                .filter(item -> item.getUser() != null && currentUser.getId().equals(item.getUser().getId()))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("No worker profile linked to this account"));
+        Worker worker = findWorkerForCurrentUser(currentUser.getId());
 
         Issue issue = getIssueById(issueId);
         if (issue.getAssignedWorker() == null
@@ -478,10 +531,7 @@ public class IssueService {
             throw new RuntimeException("Please login to submit task for review");
         }
 
-        Worker worker = workerRepository.findAll().stream()
-                .filter(item -> item.getUser() != null && currentUser.getId().equals(item.getUser().getId()))
-                .findFirst()
-                .orElseThrow(() -> new RuntimeException("No worker profile linked to this account"));
+        Worker worker = findWorkerForCurrentUser(currentUser.getId());
 
         Issue issue = getIssueById(issueId);
         if (issue.getAssignedWorker() == null
@@ -557,10 +607,7 @@ public class IssueService {
     @Transactional(readOnly = true)
     public List<Issue> getReviewPendingTasks() {
         // Admin endpoint to get all tasks pending review
-        return repository.findAll().stream()
-                .filter(issue -> issue.getStatus() == com.civicwatch.model.Status.REVIEW)
-                .map(this::enrichIssueCounts)
-                .toList();
+        return enrichIssueCounts(repository.findByStatusOrderByCreatedAtDesc(com.civicwatch.model.Status.REVIEW));
     }
 
     @Transactional
@@ -1120,9 +1167,115 @@ public class IssueService {
         if (issue == null || issue.getId() == null) {
             return issue;
         }
-        issue.setVoteCount(voteRepository.countByIssueId(issue.getId()));
-        issue.setCommentCount(commentRepository.countByIssueId(issue.getId()));
-        return issue;
+        return enrichIssueCounts(List.of(issue)).stream().findFirst().orElse(issue);
+    }
+
+    private List<Issue> enrichIssueCounts(List<Issue> issues) {
+        if (issues == null || issues.isEmpty()) {
+            return issues;
+        }
+        List<UUID> issueIds = issues.stream().map(Issue::getId).filter(Objects::nonNull).toList();
+        if (issueIds.isEmpty()) {
+            return issues;
+        }
+        Map<UUID, Long> voteCounts = loadIssueCounts("votes", issueIds);
+        Map<UUID, Long> commentCounts = loadIssueCounts("comments", issueIds);
+        issues.forEach(issue -> {
+            UUID issueId = issue.getId();
+            issue.setVoteCount(voteCounts.getOrDefault(issueId, 0L));
+            issue.setCommentCount(commentCounts.getOrDefault(issueId, 0L));
+        });
+        return issues;
+    }
+
+    private Worker findWorkerForCurrentUser(UUID currentUserId) {
+        return workerRepository.findByUserId(currentUserId)
+                .orElseThrow(() -> new RuntimeException("No worker profile linked to this account"));
+    }
+
+    private Map<UUID, Long> loadIssueCounts(String tableName, List<UUID> issueIds) {
+        if (issueIds == null || issueIds.isEmpty()) {
+            return Map.of();
+        }
+        try {
+            String placeholders = issueIds.stream().map(id -> "?").collect(Collectors.joining(","));
+            String sql = "SELECT issue_id AS ref_id, COUNT(*) AS cnt FROM " + tableName
+                    + " WHERE issue_id IN (" + placeholders + ") GROUP BY issue_id";
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, issueIds.toArray());
+            Map<UUID, Long> result = new HashMap<>();
+            for (Map<String, Object> row : rows) {
+                UUID refId = toUuid(getRowValue(row, "ref_id", null));
+                if (refId == null) {
+                    continue;
+                }
+                Object countValue = getRowValue(row, "cnt", 0);
+                long count = (countValue instanceof Number number) ? number.longValue() : 0L;
+                result.put(refId, count);
+            }
+            return result;
+        } catch (DataAccessException ex) {
+            // Fallback keeps endpoint available on DBs with different UUID column bindings.
+            Map<UUID, Long> fallback = new HashMap<>();
+            for (UUID issueId : issueIds) {
+                long count = "votes".equals(tableName)
+                        ? voteRepository.countByIssueId(issueId)
+                        : commentRepository.countByIssueId(issueId);
+                fallback.put(issueId, count);
+            }
+            return fallback;
+        }
+    }
+
+    private Map<UUID, Long> loadActiveIssueCountsForWorkers(List<UUID> workerIds) {
+        if (workerIds == null || workerIds.isEmpty()) {
+            return Map.of();
+        }
+        try {
+            String placeholders = workerIds.stream().map(id -> "?").collect(Collectors.joining(","));
+            String sql = """
+                    SELECT worker_id AS ref_id, COUNT(*) AS cnt
+                    FROM issues
+                    WHERE worker_id IN (%s)
+                      AND status IN ('OPEN', 'IN_PROGRESS')
+                    GROUP BY worker_id
+                    """.formatted(placeholders);
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, workerIds.toArray());
+            Map<UUID, Long> result = new HashMap<>();
+            for (Map<String, Object> row : rows) {
+                UUID refId = toUuid(getRowValue(row, "ref_id", null));
+                if (refId == null) {
+                    continue;
+                }
+                Object countValue = getRowValue(row, "cnt", 0);
+                long count = (countValue instanceof Number number) ? number.longValue() : 0L;
+                result.put(refId, count);
+            }
+            return result;
+        } catch (DataAccessException ex) {
+            Map<UUID, Long> fallback = new HashMap<>();
+            List<com.civicwatch.model.Status> activeStatuses = List.of(
+                    com.civicwatch.model.Status.OPEN,
+                    com.civicwatch.model.Status.IN_PROGRESS
+            );
+            for (UUID workerId : workerIds) {
+                fallback.put(workerId, repository.countByAssignedWorkerIdAndStatusIn(workerId, activeStatuses));
+            }
+            return fallback;
+        }
+    }
+
+    private UUID toUuid(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof UUID uuid) {
+            return uuid;
+        }
+        try {
+            return UUID.fromString(String.valueOf(value));
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     private void addReputationPoints(User user, int delta) {
@@ -1165,6 +1318,18 @@ public class IssueService {
     private void ensureIssueReviewColumns() {
         jdbcTemplate.execute("ALTER TABLE issues ADD COLUMN IF NOT EXISTS review_photo_url TEXT");
         jdbcTemplate.execute("ALTER TABLE issues ADD COLUMN IF NOT EXISTS review_notes TEXT");
+    }
+
+    private void ensurePerformanceIndexes() {
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_issues_status_created_at ON issues (status, created_at DESC)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_issues_category_created_at ON issues (category, created_at DESC)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_issues_created_by_created_at ON issues (user_id, created_at DESC)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_issues_worker_status_created_at ON issues (worker_id, status, created_at DESC)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_comments_issue_id ON comments (issue_id)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_votes_issue_id ON votes (issue_id)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_id_created_at ON notifications (user_id, created_at DESC)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_workers_user_id ON workers (user_id)");
+        jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_users_role_reputation_points ON users (role, reputation_points DESC)");
     }
 
     private void ensureNotificationScheduleTable() {

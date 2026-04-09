@@ -1,6 +1,19 @@
 import axios from 'axios';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8085/api';
+const resolveApiUrl = () => {
+  const configured = (import.meta.env.VITE_API_URL || '').trim();
+  if (!configured) {
+    return 'http://localhost:8085/api';
+  }
+
+  const normalized = configured.replace(/\/+$/, '');
+  if (normalized.endsWith('/api')) {
+    return normalized;
+  }
+  return `${normalized}/api`;
+};
+
+const API_URL = resolveApiUrl();
 
 const api = axios.create({
   baseURL: API_URL,
