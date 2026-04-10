@@ -8,6 +8,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -114,6 +115,42 @@ public class IssueService {
                 normalizedSearch,
                 PageRequest.of(0, effectiveLimit)
         ).getContent());
+    }
+
+    @Transactional(readOnly = true)
+    public List<Issue> getNearbyIssues(double lat, double lng, double radiusMeters, String category, String status, String search, int limit) {
+        int effectiveLimit = Math.max(1, Math.min(limit, 200));
+        double effectiveRadiusMeters = radiusMeters > 0 ? radiusMeters : 5000.0;
+
+        // Pull a candidate pool, then compute and sort by distance from the client location.
+        List<Issue> candidates = getIssues(category, status, search, 200);
+
+        return candidates.stream()
+                .map(issue -> new IssueDistance(issue, haversineMeters(lat, lng, issue.getLatitude(), issue.getLongitude())))
+                .filter(entry -> entry.distanceMeters() <= effectiveRadiusMeters)
+                .sorted(Comparator.comparingDouble(IssueDistance::distanceMeters))
+                .limit(effectiveLimit)
+                .map(IssueDistance::issue)
+                .toList();
+    }
+
+    private double haversineMeters(double lat1, double lon1, double lat2, double lon2) {
+        final double earthRadiusMeters = 6_371_000.0;
+
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1))
+                * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return earthRadiusMeters * c;
+    }
+
+    private record IssueDistance(Issue issue, double distanceMeters) {
+
     }
 
     public Issue createIssue(Issue issue) {

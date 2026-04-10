@@ -36,15 +36,18 @@ const Dashboard = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    navigator.geolocation.getCurrentPosition(
+    const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setLocation(loc);
       },
       () => {
         // Fallback to default location
-      }
+      },
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 }
     );
+
+    return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
   useEffect(() => {

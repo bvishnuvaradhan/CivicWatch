@@ -1,5 +1,5 @@
 import React from 'react';
-import { MapContainer, Marker, Popup, TileLayer } from 'react-leaflet';
+import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { Link } from 'react-router-dom';
 import { Issue } from '../types';
@@ -18,9 +18,20 @@ type IssuesMapProps = {
   issues: Issue[];
 };
 
+const RecenterOnLocationChange = ({ location }: { location: { lat: number; lng: number } }) => {
+  const map = useMap();
+
+  React.useEffect(() => {
+    map.setView([location.lat, location.lng]);
+  }, [location.lat, location.lng, map]);
+
+  return null;
+};
+
 const IssuesMap = ({ location, issues }: IssuesMapProps) => {
   return (
     <MapContainer center={[location.lat, location.lng]} zoom={13} style={{ height: '100%', width: '100%' }}>
+      <RecenterOnLocationChange location={location} />
       <TileLayer
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'

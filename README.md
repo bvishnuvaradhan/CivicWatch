@@ -98,7 +98,7 @@ Backend reads these environment variables:
 
 Frontend expects:
 
-- VITE_API_URL (example: http://localhost:8085/api)
+- VITE_API_URL (example: [http://localhost:8085/api](http://localhost:8085/api))
 
 ### 3. Database Setup
 
@@ -128,9 +128,24 @@ Current deployment stack:
 
 Live endpoints:
 
-- Frontend: https://civic-watch-xi.vercel.app/
-- Backend API: https://civicwatch-api-we6r.onrender.com
+- Frontend: [https://civic-watch-xi.vercel.app/](https://civic-watch-xi.vercel.app/)
+- Backend API: [https://civicwatch-api-we6r.onrender.com](https://civicwatch-api-we6r.onrender.com)
 
+### Keep Render Warm (Reduce Cold Starts)
+
+This repository includes a scheduled GitHub Action at [.github/workflows/keep-render-awake.yml](.github/workflows/keep-render-awake.yml) that pings the backend every 5 minutes.
+
+Setup steps:
+
+1. Add a repository secret named `RENDER_HEALTHCHECK_URL`.
+2. Set it to your backend health URL, for example:
+   [https://civicwatch-api-we6r.onrender.com/api/health](https://civicwatch-api-we6r.onrender.com/api/health)
+3. The workflow runs every 5 minutes and can also be triggered manually from Actions.
+
+Notes:
+
+- Keepalive reduces free-tier cold starts but does not guarantee true always-on behavior.
+- For guaranteed always-on uptime, use a paid Render plan (Starter or above).
 
 ## API and Security Notes
 

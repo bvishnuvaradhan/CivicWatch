@@ -1,0 +1,21 @@
+name: Keep Render Backend Awake
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        env:
+          BACKEND_URL: ${{ secrets.RENDER_HEALTHCHECK_URL || 'https://civicwatch-api-we6r.onrender.com' }}
+        run: |
+          echo "Pinging: $BACKEND_URL"
+          STATUS_CODE=$(curl --silent --show-error --max-time 30 --output /dev/null --write-out "%{http_code}" "$BACKEND_URL")
+          echo "Ping completed with HTTP status: $STATUS_CODE"
